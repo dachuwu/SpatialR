@@ -1,0 +1,183 @@
+---
+title: "Spatially Adjusted Time-varying Reproductive Numbers"
+author: "Ta-Chou Ng, Tzai-Hung Wen"
+date: "2019/11/07"
+output:
+  prettydoc::html_pretty:
+    theme: leonids 
+    highlight: github
+---
+```{r setting, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE, echo=FALSE}
+rm(list = ls())
+Sys.setlocale("LC_ALL", "English")
+setwd("C:/Users/user/Desktop/SpatialR")
+source("./Spatial_Reproductive_Number.R")
+
+knitr::opts_chunk$set(comment=NA, fig.width=8, fig.height=6,
+                      fig.align="center",eval=T, include=T, paged.print=T)
+```
+### Content {#TOP}
+
+1. [Preparation](#S1)
+2. [Descriptive plots](#S2)
+3. [Estimating reproductive numbers](#S3)
+4. [Visualizing individual reproductive numbers](#S4)
+
+
+
+### I. Preparation {#S1}
+
+##### Load required packages and functions 
+Please make sure the following packages are installed for the functions to work. __Matrix__ is required to handle sparse matrix in the calculation of individual reproductive numbers. __ggplot2__, __sf__,  __hexbin__ and their dependencies are required for plotting functions.  __gganimate__, __gifski__, __png__, and __transformr__ are used for producing .gif animation. Then, load the functions in `Spatial_Reproductive_Number.R` file.
+```{r eval=FALSE,include=T, paged.print=T}
+source("./Spatial_Reproductive_Number.R")
+```
+
+##### Load demo dataset
+The demo data provided in the .zip file consists of the onset date and coordinates of 1,848 individual observations. The `plot.epi` can draw the epidemic curve (incident cases over time)of this outbreak.
+```{r}
+df <- read.csv("demo_outbreak.csv", stringsAsFactors = F)
+df$date <- as.Date(df$date)  # integer format will work as well
+head(df)
+```
+
+### II. Descriptive Plots {#S2}
+Several plotting tools are provided to visualize  disease surveillance data. 
+
+#### Epidemic curve
+Epidemic curve (time series of incident cases) is the most common way to characterize temporal pattern of an outbreak. Timestamp (here, the onset date) for each case is the only arguent needed for `plot.epi()`.
+```{r}
+plot.epi(t = df$date)
+```
+
+#### Point pattern
+Point pattern is the most direct and exact way to visualize spatial pattern of an outbreak. Coordinates of the cases are neccessary input for `plot.points()`. `crs_pts` specifies the coordinate reference system (CRS) of the input coordinates (`x1` and `x2`), the default (`crs_pts=NULL`) sets the CRS to EPSG:4326, and input coordinates should be longtitude and lattitude. `base_map`(optional) allows sf-multipolygon object to be inserted as base map.
+```{r}
+base <- readRDS("Taiwan_town_sf.rds") #optional
+bnd <- c(120.1,22.9,120.4,23.1) #optional
+
+plot.points(x1 = df$long, x2= df$lat, crs_pts = NULL,
+            base_map = base, bnd = bnd)
+```
+Note that, here, we manually specify the boundary of the figure (or it will be decided by sporadic cases in the remote area) to get appropriate view of the main outbreak.
+
+#### Hexagon-bining plot
+However, point pattern can be overwhelmingly unreadable when the data points growing large. A solution "bining", aggregate the point into specified bins. Here, we provide hexagon-bining function `plot.hex()` for the job. One can set number of bins on the x-axis (automatically determined on y-axis) to tune the resolution, for example, `nbin = 50`.
+```{r}
+plot.hex(x1 = df$long, x2= df$lat, base_map = base, nbin = 50, 
+         bnd = bnd)
+```
+
+#### Kernel density estimation
+Also, one might need a smoothed overview of the clustering pattern of an outbreak. `plot.kde()` calculates the 2-d kernel density estimation, and plots the contour. `ngrid` controls the resolution in calculation.
+```{r}
+plot.kde(x1 = df$long, x2= df$lat, base_map = base, ngrid = 200,
+         bnd = bnd)
+```
+
+### III. Estimating Reproductive Numbers {#S3}
+
+#### Specify the parameters 
+Estimating spatial-adjusted reproductive numbers involves two important likelihood components that determine the transmission likelihood of each case-pair. Both of them should be chosen carefully based on prior knowledge about the disease. First is the probability distribution of __generation interval__, defined as the time interval between the infection (or onset) time of infector and infectee. In the case of dengue, we apply gamma distribution with mean = 20 days and variance = 9 day^2. We need to specify this distribution as a single-argument, log probability densiy function for the subsequent calculation for spatial-adjusted reproductive numbers. Another key component is the __spatial weighting function__. Here, we use an exponential distribution with mean tranmission distance = 125 m.
+```{r}
+lpdf_GI <- function(dt) dgamma(dt, 
+                               # translate gamma distributed mean-variance to shape-sale parameter
+                               shape=(20^2)/9, scale=9/20, 
+                               # use log probability to deal with small probabilities
+                               log = T)
+lpdf_SP <- function(dd) dexp(dd,
+                             # translate exponential distributed mean to rate
+                             rate = 1/125, log = T)
+```
+
+Visualize these two probability density functions
+```{r, fig.width=8, fig.height=4}
+g1 <- ggplot(data.frame(x = seq(0, 50, 1)), aes(x))+
+        stat_function(fun= ~ exp(lpdf_GI(.x)))+
+        theme_classic()
+g2 <- ggplot(data.frame(x = seq(0, 1000, 10)), aes(x))+
+        stat_function(fun= ~ exp(lpdf_SP(.x)))+
+        theme_classic()
+gridExtra::grid.arrange(g1, g2, ncol=2)
+```
+
+#### Calculate spatial-adjusted reproductive numbers
+`calc.Rj()` function calculate individual reproductive numbers given data (n-length vectors : `t`, `x1`, `x2`) and prespecified likelihood functions (`lpdf_GI`, `lpdf_SP`). `adj.sp` controls whether to calculate spatial-adjusted reproductive number (default = `True`). This function returns a list containing the resulting individual reproductive numbers (n-length vector) and pair-wise transmission probability, an n*n upper triangular matrix (a sparse matrix of  class "dtCMatrix").
+```{r, }
+res_adj <- calc.Rj(t = df$date, x1 = df$long, x2 = df$lat,
+                  lpdf_GI = lpdf_GI, lpdf_SP = lpdf_SP, adj.sp = T)
+
+summary(res_adj$Rj) 
+```
+
+#### Calculate non-adjusted reproductive numbers
+We can use the same function `calc.Rj(adj.sp = F)` to calculate non-adjusted reproductive numbers, where only `t` and and `lpdf_GI` are required
+```{r}
+res <- calc.Rj(t = df$date, 
+                  lpdf_GI = lpdf_GI, adj.sp = F)
+summary(res$Rj)
+```
+
+#### Visualize pair-wise transmission likelihood
+The pair-wise transmission probabilities can be visualized by `image()` method. Comparing two method, we can find that spatial-adjusted method produced irregular pattern for accounting the distance of each case-pair. On the other hand, non-adjusted produced very smooth pattern that is solely governed by the distribution of generation interval. 
+```{r, eval=FALSE}
+image(res_adj$Pij[1:200, 1:200], main="Adjusted",colorkey = T, 
+      lwd =0, at = seq(0,.25,.0025))
+image(res$Pij[1:200, 1:200], main="Non-adjusted",colorkey = T, 
+      lwd =0, at = seq(0,.25,.0025))
+```
+
+```{r, echo=FALSE, fig.width=12, fig.height=6}
+g1 <- ggplotify::as.grob(image(res_adj$Pij[1:200, 1:200], 
+                               colorkey = T,lwd =0,at = seq(0,.5,length.out = 100)))
+g2 <- ggplotify::as.grob(image(res$Pij[1:200, 1:200], 
+                               colorkey = T,lwd =0,at = seq(0,.5,length.out = 100)))
+gridExtra::grid.arrange(g1, g2, ncol=2)
+```
+
+
+
+
+### IV. Visualizing Individual Reproductive Numbers  {#S4}
+
+#### Time-varying reproductive numbers
+`plot.Rt()` converts individual reproductive numbers into time-varying reproductive number which is frequently used to characterize the evolution in transmision potential of a whole outbreak. The shaded bars (only present in spatial-adjusted method) represent the variance in the transmissibility among individuals. 
+```{r}
+df$Rj <- res$Rj
+df$Rj_adj <- res_adj$Rj
+plot.Rt(t = df$date, Rjs = list("Non-adjusted"=df$Rj,"Adjusted"=df$Rj_adj))  
+```
+
+#### Spatial pattern
+`plot.points()` and `plot.hex` allow estimated individual reproductive numbers to be mapped to the color attribute of previous plots. Just specify the estimates in the `Rj` argument. Because the original scle of individual reproductive numbers is usually large, `plot.points()` will convert it to percentiles which is then mapped to the color and point size in the figure.
+```{r}
+sdf <- df[df$date > as.Date("2007-09-15")&df$date <  as.Date("2007-10-15"),]
+plot.points(x1 = sdf$long, x2= sdf$lat,
+             Rj = sdf$Rj_adj, base_map = base, bnd = bnd)
+
+```
+
+`plot.hex()`, on the other hand, calculates the average individual reproductive numbers whithin each heaxgon, and maps them to color.
+```{r}
+plot.hex(x1 = sdf$long, x2= sdf$lat, Rj = sdf$Rj, 
+         nbin = 50, base_map = base, bnd = bnd)
+
+```
+
+#### Spatio-temporal pattern
+We use animation to visualize the spatio-temporal pattern of an outbreak's transmision potential. `animate.points()` generation animation of evolving point pattern while `animate.hex()` is used for Hexagon-bining pattern. `dt` controls the time step size in the animation
+
+```{r}
+animate.points(t = df$date, x1 = df$long, x2= df$lat,
+                Rj = df$Rj_adj,dt = 14, base_map = base,bnd = bnd)
+
+
+```
+
+```{r}
+animate.hex(t = df$date, x1 = df$long, x2= df$lat,
+                Rj = df$Rj_adj,dt = 14, base_map = base,bnd = bnd)
+```
+
+
+<center> [ __[Back to top]__ ](#TOP) </center>
